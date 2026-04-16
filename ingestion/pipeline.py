@@ -1,7 +1,7 @@
 """
 Ingestion Pipeline
 ==================
-Fetches rating actions from each agency → parses → embeds → stores in ChromaDB.
+Fetches rating actions from each agency → filters → embeds → stores in ChromaDB.
 """
 
 import os
@@ -34,8 +34,23 @@ HEADERS = {
     "Accept": "application/rss+xml, application/xml, text/html",
 }
 
+# Only keep content that's actually about rating actions
+RATING_KEYWORDS = [
+    "rating action", "downgrade", "upgrade", "affirms", "affirmed",
+    "outlook", "credit rating", "rating assigned", "placed on watch",
+    "rating withdrawn", "negative watch", "positive watch", "under review",
+    "investment grade", "speculative grade", "rating upgrade", "rating downgrade",
+    "long-term rating", "short-term rating", "issuer default rating",
+]
 
-def fetch_rss_entries(feed_url: str, agency_code: str) -> list[dict]:
+
+def is_rating_content(doc: Document) -> bool:
+    """Filter out non-rating content from RSS feeds."""
+    text = (doc.page_content + doc.metadata.get("title", "")).lower()
+    return any(keyword in text for keyword in RATING_KEYWORDS)
+
+
+def fetch_rss_entries(feed_url: str, agency_code: str) -> list:
     try:
         feed = feedparser.parse(feed_url)
         logger.info(f"[{agency_code}] RSS: fetched {len(feed.entries)} entries from {feed_url}")
@@ -63,7 +78,7 @@ def extract_text_from_html(html: str) -> str:
     return soup.get_text(separator="\n", strip=True)
 
 
-def rss_entry_to_document(entry: dict, agency_config: AgencyConfig) -> Document:
+def rss_entry_to_document(entry, agency_config: AgencyConfig) -> Document:
     pub_date = datetime.now()
     if hasattr(entry, "published_parsed") and entry.published_parsed:
         pub_date = datetime(*entry.published_parsed[:6])
@@ -104,19 +119,25 @@ def ingest_agency(agency_code: str) -> int:
         raise ValueError(f"Unknown agency: {agency_code}")
 
     logger.info(f"Starting ingestion for {config.name}")
-    raw_docs: list[Document] = []
+    raw_docs = []
 
+    # Fetch RSS entries and filter to rating-related content only
     for feed_url in config.rss_feeds:
         entries = fetch_rss_entries(feed_url, config.short_code)
         for entry in entries:
             doc = rss_entry_to_document(entry, config)
-            raw_docs.append(doc)
+            if is_rating_content(doc):
+                raw_docs.append(doc)
+                logger.info(f"[{config.short_code}] Kept: {doc.metadata.get('title', '')[:60]}")
+            else:
+                logger.debug(f"[{config.short_code}] Filtered out: {doc.metadata.get('title', '')[:60]}")
 
+    # Optionally scrape HTML press release page
     if config.scrape_strategy in ("html", "both") and config.press_release_url:
         html = fetch_html_page(config.press_release_url, config.short_code)
         if html:
             text = extract_text_from_html(html)
-            raw_docs.append(Document(
+            doc = Document(
                 page_content=text,
                 metadata={
                     "agency": config.short_code,
@@ -125,21 +146,28 @@ def ingest_agency(agency_code: str) -> int:
                     "publication_date": datetime.now().isoformat(),
                     "doc_type": "press_release_page",
                 }
-            ))
+            )
+            if is_rating_content(doc):
+                raw_docs.append(doc)
+
+    logger.info(f"[{config.short_code}] {len(raw_docs)} rating-relevant docs after filtering")
+
+    if not raw_docs:
+        logger.warning(f"[{config.short_code}] No rating content found — check feed URLs")
+        return 0
 
     splitter = get_text_splitter()
     chunks = splitter.split_documents(raw_docs)
-    logger.info(f"[{config.short_code}] Split {len(raw_docs)} docs into {len(chunks)} chunks")
+    logger.info(f"[{config.short_code}] Split into {len(chunks)} chunks")
 
-    if chunks:
-        vs = get_vector_store()
-        vs.add_documents(chunks)
-        logger.info(f"[{config.short_code}] Stored {len(chunks)} chunks in ChromaDB")
+    vs = get_vector_store()
+    vs.add_documents(chunks)
+    logger.info(f"[{config.short_code}] Stored {len(chunks)} chunks in ChromaDB")
 
     return len(chunks)
 
 
-def ingest_all_agencies() -> dict[str, int]:
+def ingest_all_agencies() -> dict:
     results = {}
     for agency_code in AGENCY_CONFIGS:
         try:
