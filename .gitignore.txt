@@ -1,0 +1,10 @@
+﻿# Never commit these
+.env
+__pycache__/
+*.pyc
+.DS_Store
+data/vectorstore/
+*.egg-info/
+.venv/
+venv/
+node_modules/
