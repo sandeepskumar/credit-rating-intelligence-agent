@@ -285,6 +285,7 @@ with tab_query:
     with col_input:
         query = st.text_area(
             "Ask anything about credit ratings",
+            value=st.session_state.get("query_input", ""),
             placeholder="e.g. What is Ford Motor Company's current rating across all agencies?",
             height=100,
             label_visibility="collapsed"
@@ -300,14 +301,16 @@ with tab_query:
             "DBRS covered bond methodology",
         ]
         for sq in sample_queries:
-            if st.button(sq, key=sq, use_container_width=True):
-                query = sq
-
+            if st.button(sq, key=f"btn_{sq}", use_container_width=True):
+                st.session_state["run_query"] = sq
+                st.session_state["query_input"] = sq
+                st.rerun()
     run_col, clear_col = st.columns([1, 5])
     with run_col:
         run_btn = st.button("RUN QUERY →", use_container_width=True)
 
-    if run_btn and query:
+    if (run_btn and query) or st.session_state.get("run_query"):
+        query = st.session_state.pop("run_query", query)
         with st.spinner("Agent reasoning..."):
             try:
                 from agent.graph import run_agent, build_agent_graph, AgentState
